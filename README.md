@@ -284,7 +284,7 @@ target_link_libraries(my_app PRIVATE RecoveryPlanner::recovery_planner)
   Store, etc.) is out of scope.
 - The CUDA proof demonstrates recovery-economics selection on a single GPU; it
   does not implement multi-GPU migration or live GPU-state transfer.
-- No general SLO enforcement is implemented; deadines/objectives are accepted as
+- No general SLO enforcement is implemented; deadlines/objectives are accepted as
   inputs.
 - The distributed proof runs over loopback; multi-node hardware topology is not
   exercised.
