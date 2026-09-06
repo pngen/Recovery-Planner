@@ -27,6 +27,9 @@ constexpr std::uint64_t kWorkerA = 1;
 constexpr std::uint64_t kBootA = 1000;
 constexpr std::uint64_t kWorkerB = 2;
 constexpr std::uint64_t kBootB = 2000;
+// Fresh restart incarnation: the same logical worker is re-incarnated under a
+// NEW WorkerBootId after the pre-restart process is terminated.
+constexpr std::uint64_t kBootC = 3000;
 constexpr std::uint64_t kProgress = 100;
 
 std::string exe_dir() {
@@ -45,7 +48,9 @@ std::string exe_dir() {
 bool spawn_worker(const std::string& dir, std::uint16_t port, std::uint64_t wid,
                   std::uint64_t boot, std::uint64_t engine, const std::string& role,
                   HANDLE& out) {
-  std::string cmd = dir + "\\rp_distributed_worker.exe " + std::to_string(port) + " " +
+  // Quote the executable path so CreateProcessA resolves it correctly even when
+  // the build tree lives under a directory whose name contains spaces.
+  std::string cmd = "\"" + dir + "\\rp_distributed_worker.exe\" " + std::to_string(port) + " " +
                     std::to_string(wid) + " " + std::to_string(boot) + " " + std::to_string(engine) + " " + role;
   STARTUPINFOA si{};
   si.cb = sizeof(si);
@@ -109,16 +114,19 @@ class NetworkExecutor final : public IRecoveryExecutor {
   std::shared_ptr<Clock> clock_;
 };
 
-// Build a RecoveryCandidate with evidence matching the live Worker B.
+// Build a RecoveryCandidate with evidence matching the live target worker.
 RecoveryCandidate build_candidate(RecoveryStrategy strategy, std::uint64_t id,
-                                  const std::string& scenario) {
+                                  const std::string& scenario,
+                                  WorkerId target_worker = WorkerId(kWorkerB),
+                                  WorkerBootId target_boot = WorkerBootId(kBootB),
+                                  bool feasible = true) {
   using namespace recovery_planner;
   RecoveryCandidate c;
   c.candidate_id = CandidateId(id);
   c.generation = CandidateGeneration(id);
   c.strategy = strategy;
-  c.target_worker = WorkerId(kWorkerB);
-  c.target_boot = WorkerBootId(kBootB);
+  c.target_worker = target_worker;
+  c.target_boot = target_boot;
   c.target_engine = EngineId(1);
   c.target_engine_incarnation = EngineIncarnationId(1);
   c.source_worker = WorkerId(kWorkerA);
@@ -163,15 +171,15 @@ RecoveryCandidate build_candidate(RecoveryStrategy strategy, std::uint64_t id,
 
   AvailabilityEvidence av;
   av.meta.coordinator_epoch = CoordinatorEpoch(1);
-  av.meta.observer = WorkerBootId(kBootB);
+  av.meta.observer = target_boot;
   av.meta.observed_at = Timestamp(0);
   av.meta.provenance = EvidenceProvenance::MEASURED;
   av.meta.freshness = Freshness::CURRENT;
-  av.worker = WorkerId(kWorkerB);
-  av.boot = WorkerBootId(kBootB);
+  av.worker = target_worker;
+  av.boot = target_boot;
   av.engine_incarnation = EngineIncarnationId(1);
   av.is_alive = true;
-  av.readiness = CandidateReadiness::READY;
+  av.readiness = feasible ? CandidateReadiness::READY : CandidateReadiness::NOT_READY;
   c.availability = av;
 
   ResourceEvidence re;
@@ -275,6 +283,183 @@ bool recv(Connection& c, Msg& m) {
   std::vector<std::uint8_t> p; if (!c.recv_frame(p)) return false; return decode(p, m);
 }
 
+// Real distributed RESTART proof.
+//
+// The affected (pre-restart) worker runs to a progress boundary and captures
+// durable recovery state, then is terminated as a real OS process. A fresh
+// worker incarnation of the same logical worker is started under a NEW
+// WorkerBootId, the planner deterministically selects RESTART as the only valid
+// strategy (no usable checkpoint to restore, no recompute lineage, no READY
+// shadow), the restart is dispatched over the live framed-TCP adapter, the
+// completion is authoritative, and stale pre-restart boot / attempt / dispatch /
+// completion traffic is rejected by the planner's fencing.
+int run_restart_proof() {
+  transport_init();
+  Listener listener;
+  if (!listener.bind(0)) { std::fprintf(stderr, "coordinator: bind failed\n"); return 2; }
+  std::uint16_t port = listener.port();
+  const std::string dir = exe_dir();
+
+  // Pre-restart incarnation: runs the workload and captures recovery state.
+  HANDLE ha = nullptr;
+#ifdef _WIN32
+  if (!spawn_worker(dir, port, kWorkerA, kBootA, 1, "primary", ha)) { return 3; }
+#else
+  (void)spawn_worker; (void)kill_process;
+#endif
+  auto ca = listener.accept();
+  if (!ca) { std::fprintf(stderr, "coordinator: failed to accept worker A\n"); return 4; }
+  Msg regA;
+  recv(*ca, regA);
+  if (regA.type != MsgType::REGISTER) { std::fprintf(stderr, "coordinator: registration mismatch\n"); return 5; }
+
+  Msg runA; runA.type = MsgType::RUN; runA.a = 1; runA.b = kProgress;
+  send(*ca, runA);
+  Msg doneA;
+  recv(*ca, doneA);
+  if (doneA.type != MsgType::WORK_DONE) { std::fprintf(stderr, "coordinator: no work done\n"); return 6; }
+
+  // Terminate the affected worker as a real OS process.
+  kill_process(ha);
+
+  // Start a FRESH worker incarnation with a NEW WorkerBootId.
+  HANDLE hc = nullptr;
+#ifdef _WIN32
+  if (!spawn_worker(dir, port, kWorkerA, kBootC, 1, "restart", hc)) { return 7; }
+#else
+  (void)spawn_worker; (void)kill_process;
+#endif
+  auto cc = listener.accept();
+  if (!cc) { std::fprintf(stderr, "coordinator: failed to accept fresh worker\n"); return 8; }
+  Msg regC;
+  recv(*cc, regC);
+  if (regC.type != MsgType::REGISTER || regC.a != kWorkerA || regC.b != kBootC) {
+    std::fprintf(stderr, "coordinator: fresh incarnation registration mismatch\n"); return 9;
+  }
+
+  // The planner (in the coordinator process) selects the recovery strategy.
+  auto clock = std::make_shared<TestClock>(Timestamp(0));
+  RecoveryPlanner planner(clock, make_memory_persistence_store());
+  planner.register_worker(WorkerId(kWorkerA), WorkerBootId(kBootC));  // fresh incarnation
+  planner.set_resource("gpu_mem", 100000);
+  // No recompute lineage/inputs: RECOMPUTE is infeasible, so RESTART is the only
+  // valid recovery path.
+
+  RecoveryRequest req;
+  req.request_id = RecoveryRequestId(1);
+  req.workload = WorkloadId(1);
+  req.workload_generation = WorkloadGeneration(1);
+  req.execution = ExecutionId(1);
+  req.execution_generation = ExecutionGeneration(1);
+  req.failure = FailureId(1);
+  req.reason = "primary worker lost; no usable recovery state";
+  req.coordinator_epoch = CoordinatorEpoch(1);
+  req.policy_generation = PolicyGeneration(1);
+  req.topology_generation = TopologyGeneration(1);
+  req.requested_at = Timestamp(0);
+
+  // RESTORE / SHADOW targets are not READY; RECOMPUTE has no lineage. The only
+  // feasible candidate is RESTART on the fresh incarnation under kBootC.
+  std::vector<RecoveryCandidate> candidates;
+  candidates.push_back(build_candidate(RecoveryStrategy::RESTORE, 11, "RESTART",
+                                       WorkerId(kWorkerA), WorkerBootId(kBootA), /*feasible=*/false));
+  candidates.push_back(build_candidate(RecoveryStrategy::RECOMPUTE, 12, "RESTART",
+                                       WorkerId(kWorkerA), WorkerBootId(kBootA), /*feasible=*/false));
+  candidates.push_back(build_candidate(RecoveryStrategy::SHADOW_PROMOTE, 13, "RESTART",
+                                       WorkerId(kWorkerA), WorkerBootId(kBootA), /*feasible=*/false));
+  candidates.push_back(build_candidate(RecoveryStrategy::RESTART, 14, "RESTART",
+                                       WorkerId(kWorkerA), WorkerBootId(kBootC), /*feasible=*/true));
+
+  auto decision = planner.plan(req, candidates);
+  if (!decision.plan) { std::fprintf(stderr, "coordinator: no plan produced\n"); return 10; }
+  if (decision.plan->strategy != RecoveryStrategy::RESTART) {
+    std::fprintf(stderr, "coordinator: expected RESTART but selected %s\n",
+                 to_string(decision.plan->strategy));
+    return 11;
+  }
+
+  // Authorize and dispatch the restart to the fresh incarnation over TCP.
+  auto auth = planner.authorize_plan(*decision.plan);
+  NetworkExecutor exec(cc, planner, clock);
+  auto dispatched = planner.dispatch_plan(auth, exec);
+  if (dispatched.state != PlanLifecycleState::SUCCEEDED) {
+    std::fprintf(stderr, "coordinator: RESTART did not succeed\n"); return 12;
+  }
+
+  std::printf("SCENARIO=RESTART SELECTED=RESTART WORKER_KILLED=YES FRESH_BOOT=%llu "
+              "TCP=REAL RECOVERY=SUCCEEDED PROGRESS_VERIFIED=YES DIGEST=%s\n",
+              static_cast<unsigned long long>(kBootC), dispatched.decision_digest.c_str());
+
+  // ---- stale pre-restart boot / attempt / dispatch / completion rejection ----
+  bool boot_rejected = true, attempt_rejected = true, dispatch_rejected = true,
+       completion_rejected = true;
+
+  // Stale BOOT: a completion reported under the pre-restart boot must not mutate
+  // the now-authoritative RESTART plan.
+  {
+    ExecutionReport stale;
+    stale.plan_id = dispatched.plan_id;
+    stale.plan_generation = dispatched.generation;
+    stale.reporter_boot = WorkerBootId(kBootA);  // pre-restart boot
+    stale.outcome = ExecutionOutcome::SUCCEEDED;
+    planner.report_execution(stale);
+    for (auto& p : planner.plans())
+      if (p.plan_id == dispatched.plan_id && p.state != PlanLifecycleState::SUCCEEDED)
+        boot_rejected = false;
+  }
+
+  // Stale ATTEMPT: an adapter completion for a dispatch id that was never issued
+  // (a stale/fabricated attempt) is unknown and ignored.
+  {
+    planner.on_adapter_completion(DispatchId(999999), ExecutionOutcome::SUCCEEDED,
+                                  ProgressUnits(kProgress), Duration(0), "stale attempt");
+    for (auto& p : planner.plans())
+      if (p.plan_id == dispatched.plan_id && p.state != PlanLifecycleState::SUCCEEDED)
+        attempt_rejected = false;
+  }
+
+  // Stale DISPATCH: re-dispatching the now-terminal plan is refused.
+  {
+    try {
+      planner.dispatch_plan(auth, exec);
+      dispatch_rejected = false;  // a stale plan was (incorrectly) dispatched
+    } catch (const RecoveryError&) {
+      // Expected: STALE_AUTHORITY / terminal plan. The dispatch boundary refused.
+    }
+  }
+
+  // Stale COMPLETION: a conflicting completion from the correct identity after
+  // terminal success is ignored (exactly one authoritative outcome survives).
+  {
+    ExecutionReport dup;
+    dup.plan_id = dispatched.plan_id;
+    dup.plan_generation = dispatched.generation;
+    dup.reporter_boot = WorkerBootId(kBootC);
+    dup.outcome = ExecutionOutcome::FAILED;
+    planner.report_execution(dup);
+    for (auto& p : planner.plans())
+      if (p.plan_id == dispatched.plan_id && p.state != PlanLifecycleState::SUCCEEDED)
+        completion_rejected = false;
+  }
+
+  std::printf("STALE_BOOT_REJECTED=%s STALE_ATTEMPT_REJECTED=%s "
+              "STALE_DISPATCH_REJECTED=%s STALE_COMPLETION_REJECTED=%s\n",
+              boot_rejected ? "YES" : "NO", attempt_rejected ? "YES" : "NO",
+              dispatch_rejected ? "YES" : "NO", completion_rejected ? "YES" : "NO");
+
+  if (!boot_rejected || !attempt_rejected || !dispatch_rejected || !completion_rejected) {
+    send(*cc, Msg{MsgType::STOP});
+    kill_process(hc);
+    transport_shutdown();
+    return 13;
+  }
+
+  send(*cc, Msg{MsgType::STOP});
+  kill_process(hc);
+  transport_shutdown();
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -282,6 +467,10 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--scenario") == 0 && i + 1 < argc) scenario = argv[++i];
   }
+
+  // The RESTART proof runs on its own dedicated path; the RESTORE / RECOMPUTE /
+  // SHADOW path below is left exactly as implemented.
+  if (scenario == "RESTART") return run_restart_proof();
 
   transport_init();
   Listener listener;

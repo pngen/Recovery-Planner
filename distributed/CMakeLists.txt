@@ -21,3 +21,5 @@ add_test(NAME distributed_recompute
          COMMAND $<TARGET_FILE:rp_distributed_coordinator> --scenario RECOMPUTE)
 add_test(NAME distributed_shadow
          COMMAND $<TARGET_FILE:rp_distributed_coordinator> --scenario SHADOW)
+add_test(NAME distributed_restart
+         COMMAND $<TARGET_FILE:rp_distributed_coordinator> --scenario RESTART)

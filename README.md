@@ -199,6 +199,16 @@ the live connection. It exercises RESTORE, RECOMPUTE, and SHADOW_PROMOTE
 selection end-to-end with real worker process kill, fresh WorkerBootId fencing,
 and stale-completion rejection.
 
+A separate RESTART proof runs the same real multiprocess framing: Worker A is
+terminated as a real OS process after producing durable recovery state, a fresh
+worker incarnation of the same logical worker is started under a NEW
+WorkerBootId, the planner deterministically selects RESTART as the only valid
+strategy (no usable checkpoint to restore, no recompute lineage, no READY
+shadow), and the restart is dispatched over the live framed-TCP adapter and
+completes authoritatively. The proof then shows that stale pre-restart
+boot/attempt/dispatch/completion traffic is rejected by the planner's fencing,
+leaving exactly one authoritative outcome.
+
 ## CUDA proof
 
 An optional CUDA proof runs on real RTX 5090 hardware (CUDA 13.1, sm_120). It
