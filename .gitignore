@@ -1,0 +1,28 @@
+# Build directories
+/build/
+/build_asan/
+/build_cuda/
+/build_debug/
+/out/
+/cmake-build-*/
+
+# IDE
+/.vs/
+/.vscode/
+/.idea/
+*.suo
+*.user
+
+# Test / temp artifacts
+*.tmp
+*.log
+*.rpp
+/TestResults/
+/nc-out/
+
+# Scripts
+# (instance-specific temp helper scripts are kept out of the tree)
+
+# Windows
+Thumbs.db
+Desktop.ini

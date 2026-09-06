@@ -1,0 +1,5 @@
+add_executable(recovery_examples recovery_examples.cpp)
+target_link_libraries(recovery_examples PRIVATE recovery_planner Threads::Threads)
+recovery_planner_set_warnings(recovery_examples)
+
+add_test(NAME recovery_examples COMMAND recovery_examples)

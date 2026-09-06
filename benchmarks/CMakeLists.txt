@@ -1,0 +1,3 @@
+add_executable(recovery_planner_bench benchmark_planning.cpp)
+target_link_libraries(recovery_planner_bench PRIVATE recovery_planner Threads::Threads)
+recovery_planner_set_warnings(recovery_planner_bench)
