@@ -62,7 +62,8 @@ enum class RejectionReason : std::uint8_t {
   COMPATIBILITY_GENERATION_STALE = 21,
   POLICY_GENERATION_STALE = 22,
   WORKLOAD_GENERATION_STALE = 23,
-  INVALID_STRATEGY = 24
+  INVALID_STRATEGY = 24,
+  STATE_GENERATION_STALE = 25
 };
 
 inline const char* to_string(RejectionReason r) noexcept {
@@ -92,6 +93,7 @@ inline const char* to_string(RejectionReason r) noexcept {
     case RejectionReason::POLICY_GENERATION_STALE: return "policy_generation_stale";
     case RejectionReason::WORKLOAD_GENERATION_STALE: return "workload_generation_stale";
     case RejectionReason::INVALID_STRATEGY: return "invalid_strategy";
+    case RejectionReason::STATE_GENERATION_STALE: return "state_generation_stale";
   }
   return "unknown";
 }

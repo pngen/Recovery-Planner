@@ -105,6 +105,16 @@ FeasibilityEvaluation evaluate_feasibility(const RecoveryCandidate& candidate,
     f.insufficient = true;
   }
 
+  // 4b. State / checkpoint generation lineage consistency.
+  if (candidate.state && candidate.state->state_generation != candidate.state_generation) {
+    hard(f, ev, RejectionReason::STATE_GENERATION_STALE,
+         "candidate state generation does not match its state evidence");
+  }
+  if (candidate.checkpoint && candidate.checkpoint->state_generation != candidate.state_generation) {
+    hard(f, ev, RejectionReason::STATE_GENERATION_STALE,
+         "checkpoint state generation does not match the candidate state generation");
+  }
+
   // 5. Compatibility.
   if (candidate.compatibility) {
     const auto& co = *candidate.compatibility;

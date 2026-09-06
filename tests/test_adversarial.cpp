@@ -113,6 +113,15 @@ RP_TEST(valid_frame_roundtrips) {
 }
 
 // ---------------------------------------------------------------------------
+RP_TEST(state_generation_lineage_mismatch_rejected) {
+  auto ctx = make_context();
+  auto c = make_candidate(RecoveryStrategy::RESTORE, 1);
+  c.checkpoint->state_generation = StateGeneration(999);  // lineage mismatch
+  auto ev = evaluate_feasibility(c, make_request(), ctx);
+  RP_CHECK(!ev.feasible());
+}
+
+// ---------------------------------------------------------------------------
 RP_TEST(forbidden_strategy_rejected) {
   auto ctx = make_context();
   auto c = make_candidate(RecoveryStrategy::RECOMPUTE, 1);
